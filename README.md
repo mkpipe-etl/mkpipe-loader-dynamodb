@@ -38,10 +38,27 @@ pipelines:
         replication_method: full
 ```
 
-- `full` replication: deletes all existing items before writing (scans table keys first, then batch-deletes).
-- `incremental` replication: appends / upserts items.
-
 > **Note:** The destination table must exist in DynamoDB before loading. MkPipe does not create tables.
+
+---
+
+## Write Strategy
+
+Control how data is written to DynamoDB:
+
+```yaml
+      - name: public.events
+        target_name: MyEventsTable
+        write_strategy: upsert       # append | replace | upsert
+```
+
+| Strategy | DynamoDB Behavior |
+|---|---|
+| `append` | `PutItem` via `batch_writer` (default for incremental). Items with the same primary key are overwritten — DynamoDB `PutItem` is naturally idempotent. |
+| `replace` | Scan and delete all existing items, then `PutItem` (default for full) |
+| `upsert` | Same as `append` — DynamoDB `PutItem` is a natural upsert by primary key |
+
+> **Note:** DynamoDB uses its own primary key for upsert semantics. `write_key` is not required — the DynamoDB table's key schema is used automatically.
 
 ---
 
@@ -70,8 +87,9 @@ Write throughput is controlled by `batchsize` — used to chunk the `collect()`-
 |---|---|---|---|
 | `name` | string | required | Source table name |
 | `target_name` | string | required | DynamoDB destination table name |
-| `replication_method` | `full` / `incremental` | `full` | `full` clears table first; `incremental` upserts |
+| `replication_method` | `full` / `incremental` | `full` | Replication strategy |
 | `batchsize` | int | `10000` | Python-level chunk size before `batch_writer` |
+| `write_strategy` | string | — | `append`, `replace`, `upsert` |
 | `dedup_columns` | list | — | Columns used for `mkpipe_id` hash deduplication |
 | `tags` | list | `[]` | Tags for selective pipeline execution |
 | `pass_on_error` | bool | `false` | Skip table on error instead of failing |

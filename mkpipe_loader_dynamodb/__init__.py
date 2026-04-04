@@ -3,9 +3,11 @@ import json
 from datetime import datetime
 from decimal import Decimal
 
+from mkpipe.exceptions import ConfigError, LoadError
+from mkpipe.models import ConnectionConfig, ExtractResult, TableConfig, WriteStrategy
 from mkpipe.spark.base import BaseLoader
 from mkpipe.spark.columns import add_etl_columns
-from mkpipe.models import ConnectionConfig, ExtractResult, TableConfig
+from mkpipe.strategy import resolve_write_strategy
 from mkpipe.utils import get_logger
 
 logger = get_logger(__name__)
@@ -44,7 +46,6 @@ class DynamoDBLoader(BaseLoader, variant='dynamodb'):
 
     def load(self, table: TableConfig, data: ExtractResult, spark) -> None:
         target_name = table.target_name
-        write_mode = data.write_mode
         df = data.df
 
         if df is None:
@@ -53,41 +54,54 @@ class DynamoDBLoader(BaseLoader, variant='dynamodb'):
 
         df = add_etl_columns(df, datetime.now(), dedup_columns=table.dedup_columns)
 
+        strategy = resolve_write_strategy(table, data)
+
         logger.info({
             'table': target_name,
             'status': 'loading',
-            'write_mode': write_mode,
+            'write_strategy': strategy.value,
         })
 
-        import boto3
+        try:
+            import boto3
 
-        session = boto3.Session(
-            aws_access_key_id=self.aws_access_key,
-            aws_secret_access_key=self.aws_secret_key,
-            region_name=self.region,
-        )
-        dynamodb = session.resource('dynamodb')
-        ddb_table = dynamodb.Table(target_name)
+            session = boto3.Session(
+                aws_access_key_id=self.aws_access_key,
+                aws_secret_access_key=self.aws_secret_key,
+                region_name=self.region,
+            )
+            dynamodb = session.resource('dynamodb')
+            ddb_table = dynamodb.Table(target_name)
 
-        if write_mode == 'overwrite':
-            scan_kwargs = {}
-            key_names = [k['AttributeName'] for k in ddb_table.key_schema]
-            while True:
-                response = ddb_table.scan(**scan_kwargs, ProjectionExpression=', '.join(key_names))
-                with ddb_table.batch_writer() as batch:
-                    for item in response.get('Items', []):
-                        batch.delete_item(Key=item)
-                if 'LastEvaluatedKey' not in response:
-                    break
-                scan_kwargs['ExclusiveStartKey'] = response['LastEvaluatedKey']
+            match strategy:
+                case WriteStrategy.REPLACE:
+                    scan_kwargs = {}
+                    key_names = [k['AttributeName'] for k in ddb_table.key_schema]
+                    while True:
+                        response = ddb_table.scan(**scan_kwargs, ProjectionExpression=', '.join(key_names))
+                        with ddb_table.batch_writer() as batch:
+                            for item in response.get('Items', []):
+                                batch.delete_item(Key=item)
+                        if 'LastEvaluatedKey' not in response:
+                            break
+                        scan_kwargs['ExclusiveStartKey'] = response['LastEvaluatedKey']
+                case WriteStrategy.APPEND | WriteStrategy.UPSERT:
+                    pass
+                case _:
+                    raise ConfigError(
+                        f"DynamoDB loader does not support write_strategy: {strategy.value}"
+                    )
 
-        rows = [row.asDict(recursive=True) for row in df.collect()]
-        batchsize = table.batchsize or 10000
+            rows = [row.asDict(recursive=True) for row in df.collect()]
 
-        with ddb_table.batch_writer() as batch:
-            for i, row in enumerate(rows):
-                item = {k: _convert_value(v) for k, v in row.items() if v is not None}
-                batch.put_item(Item=item)
+            with ddb_table.batch_writer() as batch:
+                for i, row in enumerate(rows):
+                    item = {k: _convert_value(v) for k, v in row.items() if v is not None}
+                    batch.put_item(Item=item)
+        except (ConfigError, LoadError):
+            raise
+        except Exception as e:
+            raise LoadError(f"Failed to write '{target_name}': {e}") from e
 
         df.unpersist()
         gc.collect()
