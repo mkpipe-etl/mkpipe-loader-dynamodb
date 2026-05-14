@@ -75,17 +75,17 @@ class DynamoDBLoader(BaseLoader, variant='dynamodb'):
 
             match strategy:
                 case WriteStrategy.REPLACE:
-                    if self.if_exists != 'append':
-                        scan_kwargs = {}
-                        key_names = [k['AttributeName'] for k in ddb_table.key_schema]
-                        while True:
-                            response = ddb_table.scan(**scan_kwargs, ProjectionExpression=', '.join(key_names))
-                            with ddb_table.batch_writer() as batch:
-                                for item in response.get('Items', []):
-                                    batch.delete_item(Key=item)
-                            if 'LastEvaluatedKey' not in response:
-                                break
-                            scan_kwargs['ExclusiveStartKey'] = response['LastEvaluatedKey']
+                    scan_kwargs = {}
+                    key_names = [k['AttributeName'] for k in ddb_table.key_schema]
+                    while True:
+                        response = ddb_table.scan(**scan_kwargs, ProjectionExpression=', '.join(key_names))
+                        with ddb_table.batch_writer() as batch:
+                            for item in response.get('Items', []):
+                                batch.delete_item(Key=item)
+                        if 'LastEvaluatedKey' not in response:
+                            break
+                        scan_kwargs['ExclusiveStartKey'] = response['LastEvaluatedKey']
+                    logger.info({'table': target_name, 'status': 'truncated'})
                 case WriteStrategy.APPEND | WriteStrategy.UPSERT:
                     pass
                 case _:
